@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+.pytest_cache/
+
+# Node.js
+node_modules/
+.next/
+out/
+*.log
+
+# Environment variables — NEVER commit secrets
+.env
+.env.local
+terraform.tfvars
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+
+# OS files
+.DS_Store
+Thumbs.db
