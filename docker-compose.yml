@@ -1,0 +1,119 @@
+services:
+
+  # ── Service 1: PostgreSQL Database ───────────────────────────
+  db:
+    # Use the official PostgreSQL 16 image from Docker Hub
+    # We don't need a custom Dockerfile — the official image is enough
+    image: postgres:16
+
+    # Always restart if it crashes
+    restart: always
+
+    # Environment variables — sets up the database
+    environment:
+      POSTGRES_USER: vectora # database username
+      POSTGRES_PASSWORD: vectora # database password
+      POSTGRES_DB: vectora # database name
+
+    # Persist data even if the container stops
+    # Without this, all your data disappears every time you restart
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    # Make PostgreSQL accessible on port 5432 of your machine
+    # Format is "your_machine_port:container_port"
+    ports:
+      - "5432:5432"
+
+    # Health check — Docker waits until PostgreSQL is actually
+    # ready to accept connections before starting other services
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U vectora" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Service 2: Redis Cache ────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    # "alpine" is an even smaller base image — good for simple services
+
+    restart: always
+
+    ports:
+      - "6379:6379"
+
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Service 3: FastAPI Backend ────────────────────────────────
+  backend:
+    # Build from our custom Dockerfile in the server/ folder
+    build:
+      context: ./server # where to look for the Dockerfile
+      dockerfile: Dockerfile # the filename
+
+    restart: always
+
+    ports:
+      - "8000:8000"
+
+    # Load environment variables from the .env file in the root
+    env_file:
+      - .env
+
+    # Override specific env vars for the Docker environment
+    # Inside Docker, services talk to each other by service name
+    # not "localhost" — "db" is the PostgreSQL service name above
+    environment:
+      DATABASE_URL: postgresql://vectora:vectora@db:5432/vectora
+      REDIS_URL: redis://redis:6379
+
+    # Mount our code as a volume so changes reflect immediately
+    # without rebuilding the container
+    volumes:
+      - ./server:/app
+
+    # Don't start the backend until db and redis are healthy
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Service 4: Next.js Frontend ───────────────────────────────
+  frontend:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+
+    restart: always
+
+    ports:
+      - "3000:3000"
+
+    env_file:
+      - .env
+
+    # Tell the frontend where the backend is
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+
+    # Mount code for live reloading
+    volumes:
+      - ./client:/app
+      # This line is important — it prevents the container's
+      # node_modules from being overwritten by your local folder
+      - /app/node_modules
+
+    # Frontend depends on the backend being up
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+
+
