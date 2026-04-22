@@ -1,0 +1,40 @@
+#cloud-config
+
+# Update package lists and upgrade installed packages
+package_update: true
+package_upgrade: true
+
+# Install required packages
+packages:
+  - docker.io
+  - docker-compose-v2
+  - git
+  - nginx
+
+# Run these commands after packages are installed
+runcmd:
+  # Start Docker and enable it to start on boot
+  - systemctl start docker
+  - systemctl enable docker
+
+  # Create the app directory
+  - mkdir -p /app
+
+  # Clone your GitHub repository
+  - git clone https://github.com/Vectraxis-Labs/Vectora-POC.git /app
+
+  # Go into the app folder
+  - cd /app
+
+  # Create the .env file on the server
+  # These are injected by Terraform from your terraform.tfvars
+  - |
+    cat > /app/.env << 'EOF'
+    ANTHROPIC_API_KEY=${anthropic_api_key}
+    NEXTAUTH_SECRET=change_this_to_a_random_string
+    NEXTAUTH_URL=https://${domain}
+    NEXT_PUBLIC_API_URL=https://${domain}/api
+    EOF
+
+  # Start all containers
+  - cd /app && docker compose up -d --build
