@@ -19,6 +19,7 @@ app = FastAPI(
     title="Vectora API",
     description="Backend API for the Vectora research platform",
     version="0.1.0",
+    root_path="/api",
 )
 
 # CORS — Cross-Origin Resource Sharing
