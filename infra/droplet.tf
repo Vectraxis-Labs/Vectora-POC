@@ -35,6 +35,9 @@ resource "digitalocean_vpc" "vectora" {
 # Create a Reserved IP — this IP is yours permanently
 resource "digitalocean_reserved_ip" "vectora" {
   region = var.region
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # Assign the Reserved IP to the Droplet
