@@ -1,11 +1,11 @@
 output "droplet_ip" {
-  description = "Public IP address of the Droplet"
-  value       = digitalocean_droplet.vectora.ipv4_address
+  description = "Reserved IP address (permanent)"
+  value       = digitalocean_reserved_ip.vectora.ip_address
 }
 
 output "app_url" {
   description = "URL of the application"
-  value       = "http://${digitalocean_droplet.vectora.ipv4_address}"
+  value       = "http://${digitalocean_reserved_ip.vectora.ip_address}"
 }
 
 output "database_host" {
@@ -24,7 +24,3 @@ output "spaces_bucket_name" {
   value       = digitalocean_spaces_bucket.vectora.name
 }
 
-output "spaces_cdn_endpoint" {
-  description = "CDN endpoint for the Spaces bucket"
-  value       = digitalocean_cdn.vectora.endpoint
-}

@@ -37,4 +37,5 @@ runcmd:
     EOF
 
   # Start all containers
-  - cd /app && docker compose up -d --build
+  - cd /app && docker compose build
+  - cd /app && docker compose up -d
