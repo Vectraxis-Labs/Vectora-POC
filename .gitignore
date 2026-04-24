@@ -28,3 +28,6 @@ terraform.tfvars
 # OS files
 .DS_Store
 Thumbs.db
+
+#Packer
+infra/packer/*.pkrvars.hcl

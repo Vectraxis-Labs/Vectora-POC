@@ -6,19 +6,12 @@ data "digitalocean_ssh_key" "vectora" {
 # Create the Droplet (virtual server)
 resource "digitalocean_droplet" "vectora" {
   name     = "vectora-poc"
-  image    = "ubuntu-24-04-x64"   # Ubuntu 24.04 LTS operating system
+  image    = data.digitalocean_image.vectora_snapshot.id
   size     = var.droplet_size     # s-2vcpu-4gb
   region   = var.region           # blr1 (Bangalore)
 
   # Add our SSH key so we can connect to the server
   ssh_keys = [data.digitalocean_ssh_key.vectora.id]
-
-  # cloud-init script runs automatically when the server first boots
-  # It installs Docker and starts our application
-  user_data = templatefile("scripts/cloud-init.yml", {
-    anthropic_api_key = var.anthropic_api_key
-    domain            = "localhost"
-  })
 
   # Add the Droplet to our VPC (private network)
   vpc_uuid = digitalocean_vpc.vectora.id
@@ -44,4 +37,10 @@ resource "digitalocean_reserved_ip" "vectora" {
 resource "digitalocean_reserved_ip_assignment" "vectora" {
   ip_address = digitalocean_reserved_ip.vectora.ip_address
   droplet_id = digitalocean_droplet.vectora.id
+}
+
+# Look up our snapshot by name
+data "digitalocean_image" "vectora_snapshot" {
+  name   = "vectora-snapshot"
+  source = "user"
 }
