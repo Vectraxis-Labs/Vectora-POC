@@ -47,7 +47,9 @@ build {
     environment_vars = [
       "DIGITALOCEAN_TOKEN=${var.do_token}"
     ]
-    script = "${path.root}/cleanup_snapshots.py"
+    inline = [
+      "python3 ${path.root}/cleanup_snapshots.py"
+    ]
   }
 
   # Step 1 — Wait for the server to be fully booted
