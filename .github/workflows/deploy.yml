@@ -1,0 +1,121 @@
+# The name of this workflow — shown in GitHub Actions UI
+name: Deploy to DigitalOcean
+
+# WHEN to run this workflow
+on:
+  push:
+    branches:
+      - main    # only trigger when code is pushed to main branch
+                # pushing to other branches does NOT trigger this
+
+# WHAT to do when triggered
+jobs:
+
+  # ── Job 1: Run Tests ──────────────────────────────────────────
+  test:
+    # Which type of runner to use — GitHub provides Ubuntu for free
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1 — Download your repo code onto the runner
+      # Without this, the runner has no idea what your code looks like
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2 — Set up Python on the runner
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Step 3 — Install backend dependencies
+      - name: Install backend dependencies
+        run: |
+          cd server
+          pip install -r requirements.txt
+
+      # Step 4 — Run backend linting with flake8
+      # This checks for syntax errors and obvious bugs
+      - name: Lint backend
+        run: |
+          pip install flake8
+          cd server
+          # Stop the build if there are Python syntax errors or undefined names
+          # E9 = syntax errors, F63 = invalid escape, F7 = syntax errors,
+          # F82 = undefined names — these are actual bugs, not style issues
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics \
+            --exclude=.venv,venv,__pycache__
+
+      # Step 5 — Set up Node.js on the runner
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Step 6 — Install frontend dependencies
+      - name: Install frontend dependencies
+        run: |
+          cd client
+          npm install
+
+      # Step 7 — Run frontend linting with ESLint
+      - name: Lint frontend
+        run: |
+          cd client
+          npm run lint
+
+  # ── Job 2: Deploy ─────────────────────────────────────────────
+  deploy:
+    # This job only runs AFTER the test job passes
+    # If tests fail, deployment is skipped — broken code never reaches the server
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1 — Download the repo code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2 — Set up SSH so the runner can connect to your server
+      # This adds your private SSH key to the runner's SSH agent
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          # ${{ secrets.SSH_PRIVATE_KEY }} reads from GitHub Secrets
+          # The actual key value is never visible in logs
+
+      # Step 3 — Add your server to known_hosts
+      # Without this, SSH would ask "are you sure you trust this server?"
+      # and hang waiting for a yes/no — we pre-approve it here
+      - name: Add server to known hosts
+        run: |
+          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+
+      # Step 4 — Deploy to the server
+      # This SSHs into your server and runs the deployment commands
+      - name: Deploy to server
+        run: |
+          ssh root@${{ secrets.SERVER_IP }} << 'ENDSSH'
+            echo "Starting deployment..."
+
+            # Go to the app directory
+            cd /app
+
+            # Pull the latest code from GitHub
+            git pull origin main
+
+            # Restart the containers with the new code
+            # --build rebuilds images if Dockerfile changed
+            # -d runs in background (detached)
+            docker compose up -d --build
+
+            echo "Deployment complete!"
+          ENDSSH
+
+      # Step 5 — Verify deployment was successful
+      - name: Verify deployment
+        run: |
+          sleep 30  # wait 30 seconds for containers to start
+          curl --fail http://${{ secrets.SERVER_IP }}/api/health || exit 1
+          echo "✅ Deployment verified — API is responding"
