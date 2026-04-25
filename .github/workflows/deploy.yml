@@ -1,121 +1,182 @@
-# The name of this workflow — shown in GitHub Actions UI
-name: Deploy to DigitalOcean
+name: Vectora CI/CD
 
-# WHEN to run this workflow
 on:
   push:
     branches:
-      - main    # only trigger when code is pushed to main branch
-                # pushing to other branches does NOT trigger this
+      - main
 
-# WHAT to do when triggered
 jobs:
 
-  # ── Job 1: Run Tests ──────────────────────────────────────────
+  # ── Job 1: Test ───────────────────────────────────────────────
   test:
-    # Which type of runner to use — GitHub provides Ubuntu for free
     runs-on: ubuntu-latest
-
     steps:
-      # Step 1 — Download your repo code onto the runner
-      # Without this, the runner has no idea what your code looks like
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Step 2 — Set up Python on the runner
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      # Step 3 — Install backend dependencies
-      - name: Install backend dependencies
-        run: |
-          cd server
-          pip install -r requirements.txt
-
-      # Step 4 — Run backend linting with flake8
-      # This checks for syntax errors and obvious bugs
-      - name: Lint backend
+      - name: Install and lint backend
         run: |
           pip install flake8
           cd server
-          # Stop the build if there are Python syntax errors or undefined names
-          # E9 = syntax errors, F63 = invalid escape, F7 = syntax errors,
-          # F82 = undefined names — these are actual bugs, not style issues
-          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics \
+          flake8 . --count --select=E9,F63,F7,F82 \
+            --show-source --statistics \
             --exclude=.venv,venv,__pycache__
 
-      # Step 5 — Set up Node.js on the runner
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      # Step 6 — Install frontend dependencies
-      - name: Install frontend dependencies
+      - name: Install and lint frontend
         run: |
           cd client
           npm install
-
-      # Step 7 — Run frontend linting with ESLint
-      - name: Lint frontend
-        run: |
-          cd client
           npm run lint
 
-  # ── Job 2: Deploy ─────────────────────────────────────────────
-  deploy:
-    # This job only runs AFTER the test job passes
-    # If tests fail, deployment is skipped — broken code never reaches the server
-    needs: test
+  # ── Job 2: Packer Build ───────────────────────────────────────
+  packer-build:
     runs-on: ubuntu-latest
+    needs: test
 
     steps:
-      # Step 1 — Download the repo code
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Step 2 — Set up SSH so the runner can connect to your server
-      # This adds your private SSH key to the runner's SSH agent
+      - name: Install Packer
+        run: |
+          wget -O- https://apt.releases.hashicorp.com/gpg | \
+            sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
+            https://apt.releases.hashicorp.com $(lsb_release -cs) main" | \
+            sudo tee /etc/apt/sources.list.d/hashicorp.list
+          sudo apt update && sudo apt install -y packer
+          packer --version
+
+      - name: Packer Init
+        working-directory: infra/packer
+        run: packer init .
+
+      - name: Packer Validate
+        working-directory: infra/packer
+        run: |
+          packer validate \
+            -var "do_token=${{ secrets.DO_TOKEN }}" \
+            -var "github_repo=https://github.com/${{ github.repository }}.git" \
+            vectora.pkr.hcl
+          echo "✅ Packer config is valid"
+
+      - name: Packer Build
+        working-directory: infra/packer
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DO_TOKEN }}
+        run: |
+          echo "🔨 Building new snapshot — takes ~20 minutes..."
+          packer build \
+            -var "do_token=${{ secrets.DO_TOKEN }}" \
+            -var "github_repo=https://github.com/${{ github.repository }}.git" \
+            vectora.pkr.hcl
+          echo "✅ Snapshot built successfully"
+
+  # ── Job 3: Terraform Apply ────────────────────────────────────
+  terraform-apply:
+    runs-on: ubuntu-latest
+    needs: packer-build
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Terraform
+        run: |
+          wget -O- https://apt.releases.hashicorp.com/gpg | \
+            sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
+            https://apt.releases.hashicorp.com $(lsb_release -cs) main" | \
+            sudo tee /etc/apt/sources.list.d/hashicorp.list
+          sudo apt update && sudo apt install -y terraform
+          terraform --version
+
+      - name: Terraform Init
+        working-directory: infra
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
+        run: terraform init
+
+      - name: Terraform Validate
+        working-directory: infra
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
+        run: |
+          terraform validate
+          echo "✅ Terraform config is valid"
+
+      - name: Terraform Plan
+        working-directory: infra
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
+        run: |
+          terraform plan \
+            -var "do_token=${{ secrets.DO_TOKEN }}" \
+            -var "spaces_access_key=${{ secrets.SPACES_ACCESS_KEY }}" \
+            -var "spaces_secret_key=${{ secrets.SPACES_SECRET_KEY }}" \
+            -var "anthropic_api_key=${{ secrets.ANTHROPIC_API_KEY }}" \
+            -out=tfplan
+          echo "✅ Terraform plan created"
+
+      - name: Terraform Apply
+        working-directory: infra
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
+        run: |
+          terraform apply -auto-approve tfplan
+          echo "✅ Infrastructure updated"
+
+  # ── Job 4: Deploy Code ────────────────────────────────────────
+  deploy-code:
+    runs-on: ubuntu-latest
+    needs: terraform-apply
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Set up SSH
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-          # ${{ secrets.SSH_PRIVATE_KEY }} reads from GitHub Secrets
-          # The actual key value is never visible in logs
 
-      # Step 3 — Add your server to known_hosts
-      # Without this, SSH would ask "are you sure you trust this server?"
-      # and hang waiting for a yes/no — we pre-approve it here
       - name: Add server to known hosts
         run: |
-          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+          mkdir -p ~/.ssh
+          ssh-keyscan -H -T 60 ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            echo "❌ Server unreachable"
+            exit 1
+          fi
+          echo "✅ Server fingerprint added"
 
-      # Step 4 — Deploy to the server
-      # This SSHs into your server and runs the deployment commands
       - name: Deploy to server
         run: |
           ssh root@${{ secrets.SERVER_IP }} << 'ENDSSH'
-            echo "Starting deployment..."
-
-            # Go to the app directory
+            echo "🚀 Starting deployment..."
             cd /app
-
-            # Pull the latest code from GitHub
             git pull origin main
-
-            # Restart the containers with the new code
-            # --build rebuilds images if Dockerfile changed
-            # -d runs in background (detached)
             docker compose up -d --build
-
-            echo "Deployment complete!"
+            echo "🎉 Deployment complete!"
           ENDSSH
 
-      # Step 5 — Verify deployment was successful
       - name: Verify deployment
         run: |
-          sleep 30  # wait 30 seconds for containers to start
+          echo "Waiting 30 seconds for containers to start..."
+          sleep 30
           curl --fail http://${{ secrets.SERVER_IP }}/api/health || exit 1
-          echo "✅ Deployment verified — API is responding"
+          echo "✅ Deployment verified — API is healthy"
