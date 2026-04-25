@@ -28,7 +28,7 @@ def cleanup_snapshots(token: str, snapshot_name: str = "vectora-snapshot"):
         with urllib.request.urlopen(req) as response:
             data = json.loads(response.read())
     except urllib.error.HTTPError as e:
-        print(f"❌ Failed to fetch snapshots: {e}")
+        print(f"Failed to fetch snapshots: {e}")
         print(f"Response: {e.read().decode()}")
         sys.exit(1)
 
@@ -42,10 +42,10 @@ def cleanup_snapshots(token: str, snapshot_name: str = "vectora-snapshot"):
     matching = [s for s in all_snapshots if s["name"] == snapshot_name]
 
     if not matching:
-        print("✅ No old snapshots found. Nothing to clean up.")
+        print("No old snapshots found. Nothing to clean up.")
         return
 
-    print(f"🗑️  Found {len(matching)} snapshot(s) to delete.")
+    print(f"Found {len(matching)} snapshot(s) to delete.")
 
     # Delete each matching snapshot
     deleted = 0
@@ -62,13 +62,13 @@ def cleanup_snapshots(token: str, snapshot_name: str = "vectora-snapshot"):
 
         try:
             urllib.request.urlopen(del_req)
-            print(f"   ✅ Deleted snapshot {snapshot_id}")
+            print(f"Deleted snapshot {snapshot_id}")
             deleted += 1
         except urllib.error.HTTPError as e:
-            print(f"   ❌ Failed to delete {snapshot_id}: {e}")
-            print(f"   Response: {e.read().decode()}")
+            print(f"Failed to delete {snapshot_id}: {e}")
+            print(f"Response: {e.read().decode()}")
 
-    print(f"🎉 Cleanup complete. Deleted {deleted}/{len(matching)} snapshot(s).")
+    print(f"Cleanup complete. Deleted {deleted}/{len(matching)} snapshot(s).")
 
 
 if __name__ == "__main__":
@@ -76,7 +76,7 @@ if __name__ == "__main__":
     token = os.environ.get("DIGITALOCEAN_TOKEN")
 
     if not token:
-        print("❌ Error: DIGITALOCEAN_TOKEN environment variable not set.")
+        print("Error: DIGITALOCEAN_TOKEN environment variable not set.")
         sys.exit(1)
 
     cleanup_snapshots(token)

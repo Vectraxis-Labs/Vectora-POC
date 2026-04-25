@@ -68,7 +68,7 @@ jobs:
             -var "do_token=${{ secrets.DO_TOKEN }}" \
             -var "github_repo=https://github.com/${{ github.repository }}.git" \
             vectora.pkr.hcl
-          echo "✅ Packer config is valid"
+          echo "Packer config is valid"
 
       - name: Packer Build
         working-directory: infra/packer
@@ -80,7 +80,7 @@ jobs:
             -var "do_token=${{ secrets.DO_TOKEN }}" \
             -var "github_repo=https://github.com/${{ github.repository }}.git" \
             vectora.pkr.hcl
-          echo "✅ Snapshot built successfully"
+          echo "Snapshot built successfully"
 
   # ── Job 3: Terraform Apply ────────────────────────────────────
   terraform-apply:
@@ -115,7 +115,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
         run: |
           terraform validate
-          echo "✅ Terraform config is valid"
+          echo "Terraform config is valid"
 
       - name: Terraform Plan
         working-directory: infra
@@ -129,7 +129,7 @@ jobs:
             -var "spaces_secret_key=${{ secrets.SPACES_SECRET_KEY }}" \
             -var "anthropic_api_key=${{ secrets.ANTHROPIC_API_KEY }}" \
             -out=tfplan
-          echo "✅ Terraform plan created"
+          echo "Terraform plan created"
 
       - name: Terraform Apply
         working-directory: infra
@@ -138,7 +138,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
         run: |
           terraform apply -auto-approve tfplan
-          echo "✅ Infrastructure updated"
+          echo "Infrastructure updated"
 
   # ── Job 4: Deploy Code ────────────────────────────────────────
   deploy-code:
@@ -159,19 +159,19 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -H -T 60 ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
           if [ ! -s ~/.ssh/known_hosts ]; then
-            echo "❌ Server unreachable"
+            echo "Server unreachable"
             exit 1
           fi
-          echo "✅ Server fingerprint added"
+          echo "Server fingerprint added"
 
       - name: Deploy to server
         run: |
           ssh root@${{ secrets.SERVER_IP }} << 'ENDSSH'
-            echo "🚀 Starting deployment..."
+            echo "Starting deployment..."
             cd /app
             git pull origin main
             docker compose up -d --build
-            echo "🎉 Deployment complete!"
+            echo "Deployment complete!"
           ENDSSH
 
       - name: Verify deployment
@@ -179,4 +179,4 @@ jobs:
           echo "Waiting 30 seconds for containers to start..."
           sleep 30
           curl --fail http://${{ secrets.SERVER_IP }}/api/health || exit 1
-          echo "✅ Deployment verified — API is healthy"
+          echo "Deployment verified — API is healthy"

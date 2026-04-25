@@ -91,27 +91,19 @@ build {
 
   # Step 6 — Configure Nginx
   provisioner "shell" {
-    inline = [
-      "cat > /etc/nginx/sites-available/vectora << 'EOF'\nserver {\n    listen 80;\n    server_name _;\n    location /api {\n        rewrite ^/api(.*) $1 break;\n        proxy_pass http://localhost:8000;\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n    }\n    location / {\n        proxy_pass http://localhost:3000;\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n    }\n}\nEOF",
-      "ln -sf /etc/nginx/sites-available/vectora /etc/nginx/sites-enabled/vectora",
-      "rm -f /etc/nginx/sites-enabled/default",
-      "nginx -t",
-    ]
+    script = "${path.root}/scripts/setup_nginx.sh"
   }
 
-  # Step 7 — Create systemd service to start containers on every boot
+  # Step 7 — Create systemd service for auto-start on boot
   provisioner "shell" {
-    inline = [
-      "cat > /etc/systemd/system/vectora.service << 'EOF'\n[Unit]\nDescription=Vectora Docker Compose\nRequires=docker.service\nAfter=docker.service network-online.target\n\n[Service]\nWorkingDirectory=/app\nExecStartPre=/bin/sleep 10\nExecStart=/usr/bin/docker compose up -d\nRemainAfterExit=yes\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=multi-user.target\nEOF",
-      "systemctl enable vectora",
-    ]
+    script = "${path.root}/scripts/setup_systemd.sh"
   }
 
   # ── Runs on YOUR machine AFTER snapshot is created ────────────
   post-processor "shell-local" {
     inline = [
-      "echo '✅ Snapshot built successfully!'",
-      "echo '👉 Run: cd .. && ./up.sh to deploy'",
+      "echo 'Snapshot built successfully!'",
+      "echo 'Run: cd .. && ./up.sh to deploy'",
     ]
   }
 }
