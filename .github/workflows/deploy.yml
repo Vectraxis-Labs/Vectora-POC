@@ -1,13 +1,27 @@
-name: Vectora CI/CD
+name: Deploy to DigitalOcean
+
+# -----------------------------------------------------------------------------
+# This workflow runs on CODE cadence only: test, then deploy.
+#
+# It deliberately does NOT run Packer (image bakes) or Terraform (infra
+# changes). Those are slower, rarer, and -- in Terraform's case -- destructive,
+# so you run them by hand from your machine. See the RUNBOOK comment at the
+# bottom of this file for "when do I run what".
+# -----------------------------------------------------------------------------
 
 on:
   push:
     branches:
       - main
 
-jobs:
+# If you push twice in quick succession, cancel the older in-flight run so two
+# deploys can't race each other onto the same droplet.
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
 
-  # ── Job 1: Test ───────────────────────────────────────────────
+jobs:
+  # -- Job 1: Test --------------------------------------------------------------
   test:
     runs-on: ubuntu-latest
     steps:
@@ -38,145 +52,82 @@ jobs:
           npm install
           npm run lint
 
-  # ── Job 2: Packer Build ───────────────────────────────────────
-  packer-build:
+  # -- Job 2: Deploy ------------------------------------------------------------
+  # Only runs if the test job passed. There is no checkout here on purpose -- the
+  # droplet pulls the code itself, so the runner just needs SSH access to tell it
+  # to. The runner never holds a copy of the repo for the deploy.
+  deploy:
     runs-on: ubuntu-latest
     needs: test
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Packer
-        run: |
-          wget -O- https://apt.releases.hashicorp.com/gpg | \
-            sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
-            https://apt.releases.hashicorp.com $(lsb_release -cs) main" | \
-            sudo tee /etc/apt/sources.list.d/hashicorp.list
-          sudo apt update && sudo apt install -y packer
-          packer --version
-
-      - name: Packer Init
-        working-directory: infra/packer
-        run: packer init .
-
-      - name: Packer Validate
-        working-directory: infra/packer
-        run: |
-          packer validate \
-            -var "do_token=${{ secrets.DO_TOKEN }}" \
-            -var "github_repo=https://github.com/${{ github.repository }}.git" \
-            vectora.pkr.hcl
-          echo "Packer config is valid"
-
-      - name: Packer Build
-        working-directory: infra/packer
-        env:
-          DIGITALOCEAN_TOKEN: ${{ secrets.DO_TOKEN }}
-        run: |
-          echo "🔨 Building new snapshot — takes ~20 minutes..."
-          packer build \
-            -var "do_token=${{ secrets.DO_TOKEN }}" \
-            -var "github_repo=https://github.com/${{ github.repository }}.git" \
-            vectora.pkr.hcl
-          echo "Snapshot built successfully"
-
-  # ── Job 3: Terraform Apply ────────────────────────────────────
-  terraform-apply:
-    runs-on: ubuntu-latest
-    needs: packer-build
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Terraform
-        run: |
-          wget -O- https://apt.releases.hashicorp.com/gpg | \
-            sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
-            https://apt.releases.hashicorp.com $(lsb_release -cs) main" | \
-            sudo tee /etc/apt/sources.list.d/hashicorp.list
-          sudo apt update && sudo apt install -y terraform
-          terraform --version
-
-      - name: Terraform Init
-        working-directory: infra
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
-        run: terraform init
-
-      - name: Terraform Validate
-        working-directory: infra
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
-        run: |
-          terraform validate
-          echo "Terraform config is valid"
-
-      - name: Terraform Plan
-        working-directory: infra
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
-        run: |
-          terraform plan \
-            -var "do_token=${{ secrets.DO_TOKEN }}" \
-            -var "spaces_access_key=${{ secrets.SPACES_ACCESS_KEY }}" \
-            -var "spaces_secret_key=${{ secrets.SPACES_SECRET_KEY }}" \
-            -var "anthropic_api_key=${{ secrets.ANTHROPIC_API_KEY }}" \
-            -out=tfplan
-          echo "Terraform plan created"
-
-      - name: Terraform Apply
-        working-directory: infra
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
-        run: |
-          terraform apply -auto-approve tfplan
-          echo "Infrastructure updated"
-
-  # ── Job 4: Deploy Code ────────────────────────────────────────
-  deploy-code:
-    runs-on: ubuntu-latest
-    needs: terraform-apply
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up SSH
+      - name: Load SSH key into the agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
+          # Private half of the key whose PUBLIC half DigitalOcean injected into
+          # the droplet (your "vectora-key"). This is what lets the runner SSH in
+          # as root. It is NOT the same key the droplet uses to talk to GitHub.
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      - name: Add server to known hosts
+      - name: Trust the server's host key
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H -T 60 ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
           if [ ! -s ~/.ssh/known_hosts ]; then
-            echo "Server unreachable"
+            echo "Could not reach the server -- aborting before we touch it."
             exit 1
           fi
-          echo "Server fingerprint added"
 
-      - name: Deploy to server
+      - name: Pull latest code and restart containers
         run: |
-          ssh root@${{ secrets.SERVER_IP }} << 'ENDSSH'
-            echo "Starting deployment..."
-            cd /app
-            git pull origin main
-            docker compose up -d --build
-            echo "Deployment complete!"
+          ssh root@${{ secrets.SERVER_IP }} 'bash -s' << 'ENDSSH'
+          set -e
+          cd /app
+          echo ">>> Fetching origin and resetting to main..."
+          git fetch --all --prune
+          git reset --hard origin/main
+          echo ">>> Rebuilding and restarting containers..."
+          docker compose up -d --build --remove-orphans
+          echo ">>> Reclaiming disk from old image layers..."
+          docker image prune -f
+          echo ">>> Done."
           ENDSSH
 
-      - name: Verify deployment
+      - name: Verify the API is healthy
         run: |
-          echo "Waiting 30 seconds for containers to start..."
-          sleep 30
-          curl --fail http://${{ secrets.SERVER_IP }}/api/health || exit 1
-          echo "Deployment verified — API is healthy"
+          echo "Polling /api/health until it responds..."
+          for attempt in $(seq 1 10); do
+            if curl --fail --silent "http://${{ secrets.SERVER_IP }}/api/health"; then
+              echo ""
+              echo "Healthy on attempt ${attempt}."
+              exit 0
+            fi
+            echo "Attempt ${attempt}: not ready, retrying in 6s..."
+            sleep 6
+          done
+          echo "API never became healthy -- failing the deploy."
+          exit 1
+
+# =============================================================================
+# RUNBOOK -- when do I run what?
+# -----------------------------------------------------------------------------
+# App code change (.py, .tsx, ...)        -> just `git push`     (auto, ~1-2 min)
+# App dependency change (requirements/    -> just `git push`     (auto, ~2-4 min;
+#   package.json)                            the image rebuilds in place)
+#
+# Infra change (open a port, resize the   -> by hand, on your machine:
+#   droplet, DNS, DB settings)                 cd infra
+#                                              terraform plan      # READ this
+#                                              terraform apply
+#   (Won't recreate the droplet, because of lifecycle.ignore_changes = [image].)
+#
+# Base-image / system change (OS patch,   -> by hand, on your machine:
+#   change baked Nginx/systemd, bump          cd infra/packer
+#   Docker)                                    packer build -var-file=... vectora.pkr.hcl
+#                                            then deliberately cycle the box:
+#                                              cd ..
+#                                              terraform apply -replace=digitalocean_droplet.vectora
+#
+# Spin up from nothing  -> ./up.sh     (a snapshot must already exist)
+# Tear down             -> ./destroy.sh   (NOT bare `terraform destroy`)
+# =============================================================================

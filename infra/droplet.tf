@@ -17,6 +17,14 @@ resource "digitalocean_droplet" "vectora" {
   vpc_uuid = digitalocean_vpc.vectora.id
 
   tags = ["vectora", "poc"]
+  # The image is chosen once, at creation. Don't let a routine `terraform apply`
+  # recreate this droplet just because a newer snapshot now carries the
+  # "vectora-snapshot" name. To deliberately move onto a fresh snapshot:
+  #   terraform apply -replace=digitalocean_droplet.vectora
+  lifecycle {
+    ignore_changes = [image]
+  }
+  
 }
 
 # Create a private network for our resources to communicate securely
