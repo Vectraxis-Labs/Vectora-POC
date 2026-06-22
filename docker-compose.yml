@@ -86,7 +86,7 @@ services:
 
     # Tell the frontend where the backend is
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_API_URL: /api
 
     # Mount code for live reloading
     volumes:

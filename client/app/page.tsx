@@ -9,9 +9,9 @@ export default function LandingPage() {
           href="/home"
           className="mt-6 inline-block px-5 py-2 bg-gray-900 text-white rounded-lg text-sm"
         >
-        Enter App →
-      </a>
-    </div>
+          Enter App →
+        </a>
+      </div>
     </main >
   );
 }
