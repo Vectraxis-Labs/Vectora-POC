@@ -2,31 +2,17 @@ services:
 
   # ── Service 1: PostgreSQL Database ───────────────────────────
   db:
-    # Use the official PostgreSQL 16 image from Docker Hub
-    # We don't need a custom Dockerfile — the official image is enough
-    image: postgres:16
-
-    # Always restart if it crashes
+    image: pgvector/pgvector:pg16 # was: postgres:16
     restart: always
-
-    # Environment variables — sets up the database
     environment:
-      POSTGRES_USER: vectora # database username
-      POSTGRES_PASSWORD: vectora # database password
-      POSTGRES_DB: vectora # database name
-
-    # Persist data even if the container stops
-    # Without this, all your data disappears every time you restart
+      POSTGRES_USER: vectora
+      POSTGRES_PASSWORD: vectora
+      POSTGRES_DB: vectora
     volumes:
       - postgres_data:/var/lib/postgresql/data
-
-    # Make PostgreSQL accessible on port 5432 of your machine
-    # Format is "your_machine_port:container_port"
+      - ./scripts/db-init:/docker-entrypoint-initdb.d:ro # NEW -- see Step 2
     ports:
       - "5432:5432"
-
-    # Health check — Docker waits until PostgreSQL is actually
-    # ready to accept connections before starting other services
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U vectora" ]
       interval: 5s
@@ -115,5 +101,4 @@ services:
 
 volumes:
   postgres_data:
-
 
