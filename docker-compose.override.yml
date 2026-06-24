@@ -1,0 +1,50 @@
+# docker-compose.override.yml
+# DEVELOPMENT-only conveniences. A plain `docker compose up` auto-merges this on top of
+# docker-compose.yml. It is intentionally NOT used on the droplet, because the deploy runs
+# `docker compose -f docker-compose.yml up`, which names the base file explicitly and so
+# ignores this override.
+#
+# COMMIT THIS FILE. It's needed locally, and it's safe to commit precisely because the
+# droplet's deploy command never loads it.
+
+services:
+  # Expose the DB and Redis on localhost so you can connect with local tools
+  # (psql, a GUI, redis-cli) while developing. Not exposed in production.
+  db:
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  backend:
+    # Build only the lightweight "deps" stage: deps installed, source NOT baked in,
+    # runs as root -- ideal for live reload. This target overrides the base's "runtime".
+    build:
+      context: ./server
+      target: deps
+    # Bind-mount the live source over /app so edits are seen instantly.
+    volumes:
+      - ./server:/app
+    # Dev server with auto-reload (the deps stage has no CMD, so we supply one).
+    command: [ "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload" ]
+
+  frontend:
+    build:
+      context: ./client
+      target: deps
+    # Bind-mount live source; the anonymous volume keeps the image's node_modules
+    # from being hidden by the host folder.
+    volumes:
+      - ./client:/app
+      - /app/node_modules
+    # The dev server reads this at runtime (unlike the production build). "/api" also
+    # matches the fallback in lib/api.ts, and next.config.js rewrites /api to the
+    # backend container since there's no Nginx locally.
+    environment:
+      NEXT_PUBLIC_API_URL: /api
+    command: [ "npm", "run", "dev" ]
+
+# No "volumes:" block here -- postgres_data is declared in the base file, and the
+# /app/node_modules above is an anonymous volume that needs no declaration.

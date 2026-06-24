@@ -1,8 +1,16 @@
-services:
+# docker-compose.yml
+# PRODUCTION base. The droplet runs this explicitly: `docker compose -f docker-compose.yml up`.
+# It builds the sealed production images and runs each service's production CMD --
+# no bind mounts, no dev servers, no source mounted. The container runs exactly the image.
+#
+# Locally, a plain `docker compose up` auto-merges docker-compose.override.yml on top of
+# this and re-adds the dev conveniences. The droplet never loads the override because it
+# names this file explicitly with -f.
 
-  # ── Service 1: PostgreSQL Database ───────────────────────────
+services:
+  # -- PostgreSQL + pgvector (identical in dev and prod) --
   db:
-    image: pgvector/pgvector:pg16 # was: postgres:16
+    image: pgvector/pgvector:pg16
     restart: always
     environment:
       POSTGRES_USER: vectora
@@ -10,95 +18,68 @@ services:
       POSTGRES_DB: vectora
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./scripts/db-init:/docker-entrypoint-initdb.d:ro # NEW -- see Step 2
-    ports:
-      - "5432:5432"
+      # Runs once on a fresh data dir: enables the pgvector extension.
+      - ./scripts/db-init:/docker-entrypoint-initdb.d:ro
+    # No published ports: only the backend reaches the DB, over the internal compose
+    # network at "db:5432". Local tooling access is added in the override.
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U vectora" ]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  # ── Service 2: Redis Cache ────────────────────────────────────
+  # -- Redis (identical in dev and prod) --
   redis:
     image: redis:7.2-alpine
-    # "alpine" is an even smaller base image — good for simple services
-
     restart: always
-
-    ports:
-      - "6379:6379"
-
+    # No published ports: only the backend uses it ("redis:6379").
     healthcheck:
       test: [ "CMD", "redis-cli", "ping" ]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  # ── Service 3: FastAPI Backend ────────────────────────────────
+  # -- FastAPI backend (production image) --
   backend:
-    # Build from our custom Dockerfile in the server/ folder
     build:
-      context: ./server # where to look for the Dockerfile
-      dockerfile: Dockerfile # the filename
-
+      context: ./server
+      target: runtime # the slim production stage
     restart: always
-
-    ports:
-      - "8000:8000"
-
-    # Load environment variables from the .env file in the root
     env_file:
       - .env
-
-    # Override specific env vars for the Docker environment
-    # Inside Docker, services talk to each other by service name
-    # not "localhost" — "db" is the PostgreSQL service name above
     environment:
       DATABASE_URL: postgresql://vectora:vectora@db:5432/vectora
       REDIS_URL: redis://redis:6379
-
-    # Mount our code as a volume so changes reflect immediately
-    # without rebuilding the container
-    volumes:
-      - ./server:/app
-
-    # Don't start the backend until db and redis are healthy
+    # Only the host's Nginx needs to reach this -- bind to localhost, not 0.0.0.0.
+    ports:
+      - "127.0.0.1:8000:8000"
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # No volumes, no command: runs the Dockerfile's production CMD
+    # (uvicorn, no --reload, 4 workers) on the baked code.
 
-  # ── Service 4: Next.js Frontend ───────────────────────────────
+    # -- Next.js frontend (production image) --
   frontend:
     build:
       context: ./client
-      dockerfile: Dockerfile
-
+      target: runner # the slim production stage
     restart: always
-
-    ports:
-      - "3000:3000"
-
     env_file:
       - .env
-
-    # Tell the frontend where the backend is
-    environment:
-      NEXT_PUBLIC_API_URL: /api
-
-    # Mount code for live reloading
-    volumes:
-      - ./client:/app
-      # This line is important — it prevents the container's
-      # node_modules from being overwritten by your local folder
-      - /app/node_modules
-
-    # Frontend depends on the backend being up
+    # NOTE: NEXT_PUBLIC_* values are baked into the client bundle at BUILD time
+    # (during `npm run build`), so setting NEXT_PUBLIC_API_URL here as a runtime env
+    # var would NOT reach the browser bundle. In production the code falls back to
+    # "/api" (client/lib/api.ts) and the droplet's Nginx routes /api -> backend. To
+    # bake a non-relative value, pass it as a build arg, not a runtime env var.
+    ports:
+      - "127.0.0.1:3000:3000"
     depends_on:
       - backend
+    # No volumes, no command: runs the Dockerfile CMD (`npm run start`) serving the
+    # prebuilt .next output -- no file watching, no per-request compile.
 
 volumes:
   postgres_data:
-

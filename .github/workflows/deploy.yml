@@ -87,7 +87,7 @@ jobs:
           git fetch --all --prune
           git reset --hard origin/main
           echo ">>> Rebuilding and restarting containers..."
-          docker compose up -d --build --remove-orphans
+          docker compose -f docker-compose.yml up -d --build --remove-orphans
           echo ">>> Reclaiming disk from old image layers..."
           docker image prune -f
           echo ">>> Done."

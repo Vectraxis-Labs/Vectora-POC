@@ -1,20 +1,24 @@
-# ── Stage 1: Base image ──────────────────────────────────────
-# Official Node.js 20 image (slim version)
-FROM node:20-slim
-
-# ── Stage 2: Set the working directory ───────────────────────
+# Stage 1: deps -- install ALL dependencies. DEV targets this stage.
+FROM node:20-slim AS deps
 WORKDIR /app
-
-# ── Stage 3: Install dependencies ────────────────────────────
-# Copy package files first (same caching trick as the backend)
 COPY package.json package-lock.json ./
-RUN npm install
+RUN npm ci
 
-# ── Stage 4: Copy the rest of the frontend code ──────────────
+# Stage 2: builder -- produce the optimized production build.
+FROM deps AS builder
 COPY . .
+RUN npm run build
 
-# ── Stage 5: Expose the port ─────────────────────────────────
+# Stage 3: runner -- slim production runtime. PROD targets this.
+FROM node:20-slim AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+RUN addgroup --system --gid 1001 nodejs \
+    && adduser --system --uid 1001 nextjs
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./package.json
+USER nextjs
 EXPOSE 3000
-
-# ── Stage 6: Start the Next.js development server ────────────
-CMD ["npm", "run", "dev"]
+CMD ["npm", "run", "start"]
