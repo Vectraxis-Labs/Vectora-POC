@@ -46,3 +46,19 @@ variable "spaces_secret_key" {
   sensitive   = true
 }
 
+variable "domain" {
+  description = "The domain name for the app"
+  type        = string
+  default     = "vectraxis-labs.com"
+}
+
+variable "letsencrypt_email" {
+  description = "Email Let's Encrypt uses for expiry/renewal notices"
+  type        = string
+}
+
+variable "github_repo" {
+  description = "Public Git repo to clone on the droplet at boot"
+  type        = string
+  default     = "https://github.com/Vectraxis-Labs/Vectora-POC.git"
+}

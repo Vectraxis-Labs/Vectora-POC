@@ -1,0 +1,207 @@
+#cloud-config
+# =============================================================================
+# Vectora PoC -- first-boot configuration (cloud-init).
+#
+# Rendered by Terraform's templatefile() in droplet.tf. The five tokens it fills
+# in (domain, letsencrypt_email, github_repo, do_token, anthropic_api_key) are
+# written as Terraform interpolations below. Everything written with a plain
+# dollar sign and NO braces -- nginx's host/remote_addr variables, bash's DOMAIN
+# variable -- is left literal, because Terraform only interpolates the
+# brace-delimited form. IMPORTANT: if you add a literal brace-delimited dollar
+# expression to any script in this file, you must double the leading dollar sign
+# so Terraform treats it as literal text rather than an expression to evaluate.
+#
+# Boot flow:
+#   1. create swap BEFORE the memory-hungry image build
+#   2. install docker + nginx + certbot (+ DO DNS plugin)
+#   3. clone the public repo, drop in .env, build PROD images, start the stack
+#   4. serve on HTTP immediately
+#   5. a systemd timer retries the DNS-01 cert until DigitalOcean is
+#      authoritative, then switches nginx to HTTPS on its own.
+# =============================================================================
+
+package_update: true
+
+packages:
+  - docker.io
+  - docker-compose-v2
+  - nginx
+  - certbot
+  - python3-certbot-dns-digitalocean
+  - git
+
+write_files:
+  # --- DigitalOcean API token, used ONLY by certbot for the DNS-01 challenge ---
+  # SECURITY: ideally this is a DNS-scoped token, not your full-access
+  # provisioning token. See the note in the chat for the one-line swap.
+  - path: /root/.secrets/certbot/digitalocean.ini
+    permissions: '0600'
+    content: |
+      dns_digitalocean_token = ${do_token}
+
+  # --- App environment. Staged here, copied into /app AFTER the clone ---
+  # (git clone needs an empty /app, so we can't write /app/.env before cloning.)
+  - path: /root/vectora.env
+    permissions: '0600'
+    content: |
+      ANTHROPIC_API_KEY=${anthropic_api_key}
+      GOOGLE_CLIENT_ID=placeholder
+      GOOGLE_CLIENT_SECRET=placeholder
+      GITHUB_CLIENT_ID=placeholder
+      GITHUB_CLIENT_SECRET=placeholder
+      NEXTAUTH_SECRET=placeholder_set_a_real_secret_in_phase_1
+      NEXTAUTH_URL=https://${domain}
+      STREAM_API_KEY=placeholder
+      STREAM_API_SECRET=placeholder
+
+  # --- Shared proxy logic, identical for the HTTP and HTTPS server blocks ---
+  - path: /etc/nginx/snippets/vectora-proxy.conf
+    permissions: '0644'
+    content: |
+      location /api {
+          rewrite ^/api(.*) $1 break;
+          proxy_pass http://localhost:8000;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+      }
+      location / {
+          proxy_pass http://localhost:3000;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+      }
+
+  # --- HTTP-only site: ACTIVE at first boot so the app serves right away ---
+  - path: /etc/nginx/sites-available/vectora-http.conf
+    permissions: '0644'
+    content: |
+      server {
+          listen 80;
+          server_name ${domain} www.${domain};
+          include snippets/vectora-proxy.conf;
+      }
+
+  # --- HTTPS site: activated by the cert script once the certificate exists ---
+  - path: /etc/nginx/sites-available/vectora-https.conf
+    permissions: '0644'
+    content: |
+      server {
+          listen 80;
+          server_name ${domain} www.${domain};
+          return 301 https://$host$request_uri;
+      }
+      server {
+          listen 443 ssl;
+          server_name ${domain} www.${domain};
+
+          ssl_certificate     /etc/letsencrypt/live/${domain}/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
+
+          include snippets/vectora-proxy.conf;
+      }
+
+  # --- Cert obtain/activate script (retried by the timer until DNS is ready) ---
+  - path: /opt/vectora/obtain-cert.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      DOMAIN="${domain}"
+      EMAIL="${letsencrypt_email}"
+      CREDS="/root/.secrets/certbot/digitalocean.ini"
+
+      activate_https() {
+          ln -sf /etc/nginx/sites-available/vectora-https.conf /etc/nginx/sites-enabled/vectora-https.conf
+          rm -f /etc/nginx/sites-enabled/vectora-http.conf
+          nginx -t && systemctl reload nginx
+          systemctl disable --now vectora-cert.timer || true
+      }
+
+      # If a cert already exists, make sure HTTPS is live and stop retrying.
+      if [ -d "/etc/letsencrypt/live/$DOMAIN" ]; then
+          if [ ! -L /etc/nginx/sites-enabled/vectora-https.conf ]; then
+              activate_https
+          fi
+          exit 0
+      fi
+
+      # Attempt DNS-01. This FAILS (and the timer retries) until DigitalOcean is
+      # authoritative for the domain -- i.e. after the GoDaddy nameserver change
+      # has propagated. No re-apply is needed; the timer handles it.
+      if certbot certonly \
+            --dns-digitalocean \
+            --dns-digitalocean-credentials "$CREDS" \
+            --dns-digitalocean-propagation-seconds 60 \
+            -d "$DOMAIN" -d "www.$DOMAIN" \
+            --non-interactive --agree-tos -m "$EMAIL" \
+            --deploy-hook "systemctl reload nginx"; then
+          activate_https
+          echo "Certificate obtained; HTTPS is now active."
+      else
+          echo "certbot failed (DNS likely not authoritative yet); will retry."
+          exit 1
+      fi
+
+  # --- systemd service: runs the cert script once ---
+  - path: /etc/systemd/system/vectora-cert.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Obtain/activate Let's Encrypt certificate for Vectora
+      After=network-online.target nginx.service
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/opt/vectora/obtain-cert.sh
+
+  # --- systemd timer: retries the cert script until it succeeds ---
+  - path: /etc/systemd/system/vectora-cert.timer
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Retry Vectora certificate acquisition until DNS is ready
+
+      [Timer]
+      OnBootSec=2min
+      OnUnitActiveSec=5min
+      Unit=vectora-cert.service
+
+      [Install]
+      WantedBy=timers.target
+
+runcmd:
+  # 1. Swap FIRST -- before docker builds the memory-hungry frontend image.
+  - fallocate -l 2G /swapfile
+  - chmod 600 /swapfile
+  - mkswap /swapfile
+  - swapon /swapfile
+  - echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+  # 2. Ensure Docker runs now and on every future boot (covers reboots, since
+  #    the compose services use `restart: always`).
+  - systemctl enable --now docker
+
+  # 3. Clone the public repo into /app (no credentials needed).
+  - git clone ${github_repo} /app
+
+  # 4. Put the real .env in place, then discard the staged copy.
+  - cp /root/vectora.env /app/.env
+  - rm -f /root/vectora.env
+
+  # 5. Build the PRODUCTION images and start the stack. The -f pins the prod
+  #    base file and ignores docker-compose.override.yml; swap covers the build.
+  - cd /app && docker compose -f docker-compose.yml up -d --build
+
+  # 6. Serve on HTTP immediately via nginx.
+  - rm -f /etc/nginx/sites-enabled/default
+  - ln -sf /etc/nginx/sites-available/vectora-http.conf /etc/nginx/sites-enabled/vectora-http.conf
+  - nginx -t && systemctl restart nginx
+
+  # 7. Start the cert retry loop -- it gets HTTPS once DNS is authoritative.
+  - systemctl daemon-reload
+  - systemctl enable --now vectora-cert.timer
