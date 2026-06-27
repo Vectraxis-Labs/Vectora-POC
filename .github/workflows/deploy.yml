@@ -1,12 +1,16 @@
 name: Deploy to DigitalOcean
 
 # -----------------------------------------------------------------------------
-# This workflow runs on CODE cadence only: test, then deploy.
+# Runs on CODE cadence only: test, then deploy.
 #
-# It deliberately does NOT run Packer (image bakes) or Terraform (infra
-# changes). Those are slower, rarer, and -- in Terraform's case -- destructive,
-# so you run them by hand from your machine. See the RUNBOOK comment at the
-# bottom of this file for "when do I run what".
+# It does NOT provision infrastructure. The droplet is created/configured by
+# Terraform + cloud-init (which clones the repo to /app and builds the prod
+# images on first boot). This pipeline only updates code on the already-running
+# droplet. Terraform is run by hand from a dev machine.
+#
+# Target is the DOMAIN, not a fixed IP: the droplet has no reserved IP, so its
+# IP churns on every recreate. DNS (managed in dns.tf) always points the domain
+# at the current droplet, so deploying to the hostname follows the box.
 # -----------------------------------------------------------------------------
 
 on:
@@ -14,11 +18,13 @@ on:
     branches:
       - main
 
-# If you push twice in quick succession, cancel the older in-flight run so two
-# deploys can't race each other onto the same droplet.
 concurrency:
   group: production-deploy
   cancel-in-progress: true
+
+env:
+  # Single source of truth for where we deploy. No raw IP anywhere.
+  DEPLOY_HOST: vectraxis-labs.com
 
 jobs:
   # -- Job 1: Test --------------------------------------------------------------
@@ -53,9 +59,8 @@ jobs:
           npm run lint
 
   # -- Job 2: Deploy ------------------------------------------------------------
-  # Only runs if the test job passed. There is no checkout here on purpose -- the
-  # droplet pulls the code itself, so the runner just needs SSH access to tell it
-  # to. The runner never holds a copy of the repo for the deploy.
+  # Only runs if tests pass. The droplet pulls the code itself; the runner just
+  # SSHes in to trigger it.
   deploy:
     runs-on: ubuntu-latest
     needs: test
@@ -64,29 +69,23 @@ jobs:
       - name: Load SSH key into the agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          # Private half of the key whose PUBLIC half DigitalOcean injected into
-          # the droplet (your "vectora-key"). This is what lets the runner SSH in
-          # as root. It is NOT the same key the droplet uses to talk to GitHub.
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
-      - name: Trust the server's host key
-        run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan -H -T 60 ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
-          if [ ! -s ~/.ssh/known_hosts ]; then
-            echo "Could not reach the server -- aborting before we touch it."
-            exit 1
-          fi
 
       - name: Pull latest code and restart containers
         run: |
-          ssh root@${{ secrets.SERVER_IP }} 'bash -s' << 'ENDSSH'
+          # PoC NOTE: strict host-key checking is disabled on purpose. The
+          # droplet is disposable and its host key changes on every recreate,
+          # which would otherwise trip SSH's "host identification changed"
+          # block. Acceptable for a PoC against a throwaway box; revisit before
+          # anything resembling production.
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            root@${DEPLOY_HOST} 'bash -s' << 'ENDSSH'
           set -e
           cd /app
           echo ">>> Fetching origin and resetting to main..."
           git fetch --all --prune
           git reset --hard origin/main
-          echo ">>> Rebuilding and restarting containers..."
+          echo ">>> Rebuilding and restarting PROD containers..."
           docker compose -f docker-compose.yml up -d --build --remove-orphans
           echo ">>> Reclaiming disk from old image layers..."
           docker image prune -f
@@ -95,9 +94,9 @@ jobs:
 
       - name: Verify the API is healthy
         run: |
-          echo "Polling /api/health until it responds..."
+          echo "Polling https://${DEPLOY_HOST}/api/health until it responds..."
           for attempt in $(seq 1 10); do
-            if curl --fail --silent "http://${{ secrets.SERVER_IP }}/api/health"; then
+            if curl --fail --silent "https://${DEPLOY_HOST}/api/health"; then
               echo ""
               echo "Healthy on attempt ${attempt}."
               exit 0
@@ -107,27 +106,3 @@ jobs:
           done
           echo "API never became healthy -- failing the deploy."
           exit 1
-
-# =============================================================================
-# RUNBOOK -- when do I run what?
-# -----------------------------------------------------------------------------
-# App code change (.py, .tsx, ...)        -> just `git push`     (auto, ~1-2 min)
-# App dependency change (requirements/    -> just `git push`     (auto, ~2-4 min;
-#   package.json)                            the image rebuilds in place)
-#
-# Infra change (open a port, resize the   -> by hand, on your machine:
-#   droplet, DNS, DB settings)                 cd infra
-#                                              terraform plan      # READ this
-#                                              terraform apply
-#   (Won't recreate the droplet, because of lifecycle.ignore_changes = [image].)
-#
-# Base-image / system change (OS patch,   -> by hand, on your machine:
-#   change baked Nginx/systemd, bump          cd infra/packer
-#   Docker)                                    packer build -var-file=... vectora.pkr.hcl
-#                                            then deliberately cycle the box:
-#                                              cd ..
-#                                              terraform apply -replace=digitalocean_droplet.vectora
-#
-# Spin up from nothing  -> ./up.sh     (a snapshot must already exist)
-# Tear down             -> ./destroy.sh   (NOT bare `terraform destroy`)
-# =============================================================================
